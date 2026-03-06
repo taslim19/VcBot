@@ -17,6 +17,7 @@
 
 
 import asyncio
+import json
 import os
 import re
 import traceback
@@ -473,12 +474,8 @@ async def download(query):
         thumb, duration = None, "Unknown"
         title = link = query
     else:
-        search = VideosSearch(query, limit=1).result()
-        data = search["result"][0]
-        link = data["link"]
-        title = data["title"]
-        duration = data.get("duration") or "♾"
-        thumb = f"https://i.ytimg.com/vi/{data['id']}/hqdefault.jpg"
+        # Prefer yt-dlp-based search to avoid youtubesearchpython/httpx issues
+        link, title, duration, thumb = await yt_search_first(query)
     dl = await get_stream_link(link)
     return dl, thumb, title, link, duration
 
@@ -499,13 +496,8 @@ async def get_stream_link(ytlink):
 
 
 async def vid_download(query):
-    search = VideosSearch(query, limit=1).result()
-    data = search["result"][0]
-    link = data["link"]
+    link, title, duration, thumb = await yt_search_first(query)
     video = await get_stream_link(link)
-    title = data["title"]
-    thumb = f"https://i.ytimg.com/vi/{data['id']}/hqdefault.jpg"
-    duration = data.get("duration") or "♾"
     return video, thumb, title, link, duration
 
 
@@ -531,24 +523,52 @@ async def dl_playlist(chat, from_user, link):
     """
     links = await get_videos_link(link)
     try:
-        search = VideosSearch(links[0], limit=1).result()
-        vid1 = search["result"][0]
-        duration = vid1.get("duration") or "♾"
-        title = vid1["title"]
-        song = await get_stream_link(vid1["link"])
-        thumb = f"https://i.ytimg.com/vi/{vid1['id']}/hqdefault.jpg"
-        return song, thumb, title, vid1["link"], duration
+        first_link = links[0]
+        link, title, duration, thumb = await yt_search_first(first_link)
+        song = await get_stream_link(link)
+        return song, thumb, title, link, duration
     finally:
         for z in links[1:]:
             try:
-                search = VideosSearch(z, limit=1).result()
-                vid = search["result"][0]
-                duration = vid.get("duration") or "♾"
-                title = vid["title"]
-                thumb = f"https://i.ytimg.com/vi/{vid['id']}/hqdefault.jpg"
-                add_to_queue(chat, None, title, vid["link"], thumb, from_user, duration)
+                link, title, duration, thumb = await yt_search_first(z)
+                add_to_queue(chat, None, title, link, thumb, from_user, duration)
             except Exception as er:
                 LOGS.exception(er)
+
+
+async def yt_search_first(query_or_url):
+    """
+    Resolve a YouTube search query or URL to (link, title, duration_str, thumb_url)
+    using yt-dlp, avoiding youtubesearchpython/httpx 'proxies' issues.
+    """
+    # If it's already a URL, query that directly, otherwise use ytsearch1:
+    if query_or_url.startswith("http://") or query_or_url.startswith("https://"):
+        target = query_or_url
+    else:
+        target = f"ytsearch1:{query_or_url}"
+
+    out = (await bash(f'yt-dlp -j "{target}"'))[0]
+    info = json.loads(out)
+
+    link = info.get("webpage_url") or info.get("original_url") or query_or_url
+    title = info.get("title") or link
+
+    dur_secs = info.get("duration")
+    if dur_secs:
+        try:
+            duration = time_formatter(int(dur_secs) * 1000)
+        except Exception:
+            duration = "♾"
+    else:
+        duration = "♾"
+
+    thumb = info.get("thumbnail")
+    if not thumb:
+        thumbs = info.get("thumbnails") or []
+        if thumbs:
+            thumb = thumbs[-1].get("url")
+
+    return link, title, duration, thumb
 
 
 async def file_download(event, reply, fast_download=True):
