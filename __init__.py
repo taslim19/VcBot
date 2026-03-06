@@ -332,9 +332,14 @@ class _PlayerCompat:
     async def start_audio(self, source):
         app = await _ensure_pytgcalls_started()
         _register_stream_end_handler()
+        from pytgcalls.types import MediaStream
+        if isinstance(source, str):
+            stream = MediaStream(source, video_flags=MediaStream.Flags.IGNORE)
+        else:
+            stream = source
         await app.play(
             self._player._chat,
-            source,
+            stream,
             GroupCallConfig(auto_start=True),
         )
         if self._player._chat not in ACTIVE_CALLS:
@@ -343,9 +348,15 @@ class _PlayerCompat:
     async def start_video(self, source, with_audio=True):
         app = await _ensure_pytgcalls_started()
         _register_stream_end_handler()
+        from pytgcalls.types import MediaStream
+        if isinstance(source, str):
+            audio_flags = MediaStream.Flags.AUTO_DETECT if with_audio else MediaStream.Flags.IGNORE
+            stream = MediaStream(source, audio_flags=audio_flags, video_flags=MediaStream.Flags.AUTO_DETECT)
+        else:
+            stream = source
         await app.play(
             self._player._chat,
-            source,
+            stream,
             GroupCallConfig(auto_start=True),
         )
         if self._player._chat not in ACTIVE_CALLS:
