@@ -6,7 +6,7 @@
 # <https://www.github.com/TeamUltroid/Ultroid/blob/main/LICENSE/>.
 
 """
-✘ Commands Available -
+✘ Commands Available (py-tgcalls 2.x) -
 
 • `{i}mutevc`
    Mute playback.

@@ -1,0 +1,4 @@
+# VcBot voice/video chat plugin (py-tgcalls 2.x)
+# Install with Telethon support (for Ultroid):
+#   pip install "py-tgcalls[telethon]"
+py-tgcalls[telethon]>=2.2.0

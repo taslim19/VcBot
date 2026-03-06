@@ -23,8 +23,10 @@ import traceback
 from time import time
 from traceback import format_exc
 
-from pytgcalls import GroupCallFactory
-from pytgcalls.exceptions import GroupCallNotFoundError
+from pytgcalls import PyTgCalls
+from pytgcalls.types import GroupCallConfig
+from pytgcalls.exceptions import NoActiveGroupCall, NotInCallError
+from pytgcalls.filters import stream_end
 from telethon.errors.rpcerrorlist import (
     ParticipantJoinMissingError,
     ChatSendMediaForbiddenError,
@@ -66,7 +68,23 @@ asstUserName = asst.me.username
 LOG_CHANNEL = udB.get_key("LOG_CHANNEL")
 ACTIVE_CALLS, VC_QUEUE = [], {}
 MSGID_CACHE, VIDEO_ON = {}, {}
-CLIENTS = {}
+
+# py-tgcalls 2.x: single app instance (Telethon)
+_pytgcalls_app = None
+
+
+def _get_pytgcalls():
+    global _pytgcalls_app
+    if _pytgcalls_app is None:
+        _pytgcalls_app = PyTgCalls(vcClient)
+    return _pytgcalls_app
+
+
+async def _ensure_pytgcalls_started():
+    app = _get_pytgcalls()
+    if not getattr(app, "_is_running", False):
+        await app.start()
+    return app
 
 
 def VC_AUTHS():
@@ -74,19 +92,96 @@ def VC_AUTHS():
     return [int(a) for a in [*owner_and_sudos(), *_vcsudos]]
 
 
+def _register_stream_end_handler():
+    """Register stream-end handler once for queue playback (py-tgcalls 2.x)."""
+    app = _get_pytgcalls()
+    if getattr(app, "_vcbot_handler_registered", False):
+        return
+    from pytgcalls.types import StreamEnded
+
+    @app.on_update(stream_end())
+    async def _on_stream_ended(client, update: StreamEnded):
+        if update.chat_id in VIDEO_ON:
+            VIDEO_ON.pop(update.chat_id)
+        await _play_from_queue(update.chat_id)
+
+    app._vcbot_handler_registered = True
+
+
+async def _play_from_queue(chat_id):
+    """Play next from queue (used by stream-end handler and skip)."""
+    app = _get_pytgcalls()
+    current_chat = LOG_CHANNEL
+    try:
+        song, title, link, thumb, from_user, pos, dur = await get_from_queue(
+            chat_id
+        )
+        try:
+            await app.play(chat_id, song, GroupCallConfig(auto_start=True))
+        except ParticipantJoinMissingError:
+            pass
+        except Exception:
+            raise
+        if MSGID_CACHE.get(chat_id):
+            await MSGID_CACHE[chat_id].delete()
+            del MSGID_CACHE[chat_id]
+        text = f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>\n⏰ Duration:</strong> <code>{dur}</code>\n👤 <strong>Requested by:</strong> {from_user}"
+
+        try:
+            xx = await vcClient.send_message(
+                current_chat,
+                f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>\n⏰ Duration:</strong> <code>{dur}</code>\n👤 <strong>Requested by:</strong> {from_user}",
+                file=thumb,
+                link_preview=False,
+                parse_mode="html",
+            )
+        except ChatSendMediaForbiddenError:
+            xx = await vcClient.send_message(
+                current_chat, text, link_preview=False, parse_mode="html"
+            )
+        MSGID_CACHE.update({chat_id: xx})
+        VC_QUEUE[chat_id].pop(pos)
+        if not VC_QUEUE[chat_id]:
+            VC_QUEUE.pop(chat_id)
+
+    except (IndexError, KeyError):
+        try:
+            await app.leave_call(chat_id)
+        except NotInCallError:
+            pass
+        if chat_id in ACTIVE_CALLS:
+            ACTIVE_CALLS.remove(chat_id)
+        await vcClient.send_message(
+            current_chat,
+            f"• Successfully Left Vc : <code>{chat_id}</code> •",
+            parse_mode="html",
+        )
+    except Exception as er:
+        LOGS.exception(er)
+        await vcClient.send_message(
+            current_chat,
+            f"<strong>ERROR:</strong> <code>{format_exc()}</code>",
+            parse_mode="html",
+        )
+
+
 class Player:
+    """Player using py-tgcalls 2.x (single PyTgCalls app, chat_id per call)."""
+
     def __init__(self, chat, event=None, video=False):
         self._chat = chat
         self._current_chat = event.chat_id if event else LOG_CHANNEL
         self._video = video
-        if CLIENTS.get(chat):
-            self.group_call = CLIENTS[chat]
-        else:
-            _client = GroupCallFactory(
-                vcClient, GroupCallFactory.MTPROTO_CLIENT_TYPE.TELETHON,
-            )
-            self.group_call = _client.get_group_call()
-            CLIENTS.update({chat: self.group_call})
+
+    @property
+    def group_call(self):
+        """Compat shim: expose is_connected and methods via a small wrapper."""
+        return _PlayerCompat(self)
+
+    async def _is_connected(self):
+        app = _get_pytgcalls()
+        gc = await app.group_calls()
+        return self._chat in gc
 
     async def make_vc_active(self):
         try:
@@ -101,27 +196,45 @@ class Player:
         return True, None
 
     async def startCall(self):
+        app = await _ensure_pytgcalls_started()
+        _register_stream_end_handler()
         if VIDEO_ON:
-            for chats in VIDEO_ON:
-                await VIDEO_ON[chats].stop()
+            for c in list(VIDEO_ON):
+                try:
+                    await app.leave_call(c)
+                except NotInCallError:
+                    pass
             VIDEO_ON.clear()
             await asyncio.sleep(3)
         if self._video:
-            for chats in list(CLIENTS):
-                if chats != self._chat:
-                    await CLIENTS[chats].stop()
-                    del CLIENTS[chats]
-            VIDEO_ON.update({self._chat: self.group_call})
+            for c in list(ACTIVE_CALLS):
+                if c != self._chat:
+                    try:
+                        await app.leave_call(c)
+                    except NotInCallError:
+                        pass
+                    if c in ACTIVE_CALLS:
+                        ACTIVE_CALLS.remove(c)
+            VIDEO_ON[self._chat] = True
         if self._chat not in ACTIVE_CALLS:
             try:
-                self.group_call.on_network_status_changed(self.on_network_changed)
-                self.group_call.on_playout_ended(self.playout_ended_handler)
-                await self.group_call.join(self._chat)
-            except GroupCallNotFoundError as er:
+                await app.play(
+                    self._chat,
+                    None,
+                    GroupCallConfig(auto_start=True),
+                )
+                ACTIVE_CALLS.append(self._chat)
+            except NoActiveGroupCall as er:
                 LOGS.info(er)
                 dn, err = await self.make_vc_active()
                 if err:
                     return False, err
+                await app.play(
+                    self._chat,
+                    None,
+                    GroupCallConfig(auto_start=True),
+                )
+                ACTIVE_CALLS.append(self._chat)
             except Exception as e:
                 LOGS.exception(e)
                 return False, e
@@ -141,57 +254,7 @@ class Player:
         await self.play_from_queue()
 
     async def play_from_queue(self):
-        chat_id = self._chat
-        if chat_id in VIDEO_ON:
-            await self.group_call.stop_video()
-            VIDEO_ON.pop(chat_id)
-        try:
-            song, title, link, thumb, from_user, pos, dur = await get_from_queue(
-                chat_id
-            )
-            try:
-                await self.group_call.start_audio(song)
-            except ParticipantJoinMissingError:
-                await self.vc_joiner()
-                await self.group_call.start_audio(song)
-            if MSGID_CACHE.get(chat_id):
-                await MSGID_CACHE[chat_id].delete()
-                del MSGID_CACHE[chat_id]
-            text = f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>\n⏰ Duration:</strong> <code>{dur}</code>\n👤 <strong>Requested by:</strong> {from_user}"
-
-            try:
-                xx = await vcClient.send_message(
-                    self._current_chat,
-                    f"<strong>🎧 Now playing #{pos}: <a href={link}>{title}</a>\n⏰ Duration:</strong> <code>{dur}</code>\n👤 <strong>Requested by:</strong> {from_user}",
-                    file=thumb,
-                    link_preview=False,
-                    parse_mode="html",
-                )
-
-            except ChatSendMediaForbiddenError:
-                xx = await vcClient.send_message(
-                    self._current_chat, text, link_preview=False, parse_mode="html"
-                )
-            MSGID_CACHE.update({chat_id: xx})
-            VC_QUEUE[chat_id].pop(pos)
-            if not VC_QUEUE[chat_id]:
-                VC_QUEUE.pop(chat_id)
-
-        except (IndexError, KeyError):
-            await self.group_call.stop()
-            del CLIENTS[self._chat]
-            await vcClient.send_message(
-                self._current_chat,
-                f"• Successfully Left Vc : <code>{chat_id}</code> •",
-                parse_mode="html",
-            )
-        except Exception as er:
-            LOGS.exception(er)
-            await vcClient.send_message(
-                self._current_chat,
-                f"<strong>ERROR:</strong> <code>{format_exc()}</code>",
-                parse_mode="html",
-            )
+        await _play_from_queue(self._chat)
 
     async def vc_joiner(self):
         chat_id = self._chat
@@ -211,6 +274,99 @@ class Player:
             parse_mode="html",
         )
         return False
+
+
+class _PlayerCompat:
+    """Compat layer so group_call.is_connected and group_call.start_audio etc. work with py-tgcalls 2.x."""
+
+    def __init__(self, player: Player):
+        self._player = player
+
+    @property
+    def is_connected(self):
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                return None
+            return loop.run_until_complete(self._player._is_connected())
+        except Exception:
+            return False
+
+    async def is_connected_async(self):
+        return await self._player._is_connected()
+
+    async def start_audio(self, source):
+        app = await _ensure_pytgcalls_started()
+        _register_stream_end_handler()
+        await app.play(
+            self._player._chat,
+            source,
+            GroupCallConfig(auto_start=True),
+        )
+        if self._player._chat not in ACTIVE_CALLS:
+            ACTIVE_CALLS.append(self._player._chat)
+
+    async def start_video(self, source, with_audio=True):
+        app = await _ensure_pytgcalls_started()
+        _register_stream_end_handler()
+        await app.play(
+            self._player._chat,
+            source,
+            GroupCallConfig(auto_start=True),
+        )
+        if self._player._chat not in ACTIVE_CALLS:
+            ACTIVE_CALLS.append(self._player._chat)
+        VIDEO_ON[self._player._chat] = True
+
+    async def stop(self):
+        app = _get_pytgcalls()
+        try:
+            await app.leave_call(self._player._chat)
+        except NotInCallError:
+            pass
+        if self._player._chat in ACTIVE_CALLS:
+            ACTIVE_CALLS.remove(self._player._chat)
+        if self._player._chat in VIDEO_ON:
+            VIDEO_ON.pop(self._player._chat)
+
+    async def stop_video(self):
+        if self._player._chat in VIDEO_ON:
+            VIDEO_ON.pop(self._player._chat)
+
+    async def set_my_volume(self, vol: int):
+        app = _get_pytgcalls()
+        await app.change_volume_call(self._player._chat, vol)
+
+    async def reconnect(self):
+        app = _get_pytgcalls()
+        try:
+            await app.leave_call(self._player._chat)
+        except NotInCallError:
+            pass
+        await app.play(
+            self._player._chat,
+            None,
+            GroupCallConfig(auto_start=True),
+        )
+
+    async def set_is_mute(self, muted: bool):
+        app = _get_pytgcalls()
+        if muted:
+            await app.mute(self._player._chat)
+        else:
+            await app.unmute(self._player._chat)
+
+    async def set_pause(self, paused: bool):
+        app = _get_pytgcalls()
+        if paused:
+            await app.pause(self._player._chat)
+        else:
+            await app.resume(self._player._chat)
+
+    def restart_playout(self):
+        asyncio.ensure_future(
+            self._player.play_from_queue(), loop=asyncio.get_event_loop()
+        )
 
 
 # --------------------------------------------------

@@ -24,9 +24,9 @@
    Skip the current song and play the next in queue, if any.
 """
 
-from pytgcalls.exceptions import NotConnectedError
+from pytgcalls.exceptions import NotInCallError
 
-from . import vc_asst, Player, get_string,CLIENTS,VIDEO_ON
+from . import vc_asst, Player, get_string, VIDEO_ON
 
 
 @vc_asst("joinvc")
@@ -40,7 +40,7 @@ async def join_(event):
     else:
         chat = event.chat_id
     ultSongs = Player(chat, event)
-    if not ultSongs.group_call.is_connected:
+    if not (await ultSongs.group_call.is_connected_async()):
         await ultSongs.vc_joiner()
 
 
@@ -56,8 +56,6 @@ async def leaver(event):
         chat = event.chat_id
     ultSongs = Player(chat)
     await ultSongs.group_call.stop()
-    if CLIENTS.get(chat):
-        del CLIENTS[chat]
     if VIDEO_ON.get(chat):
         del VIDEO_ON[chat]
     await event.eor(get_string("vcbot_1"))
@@ -76,7 +74,7 @@ async def rejoiner(event):
     ultSongs = Player(chat)
     try:
         await ultSongs.group_call.reconnect()
-    except NotConnectedError:
+    except NotInCallError:
         return await event.eor(get_string("vcbot_6"))
     await event.eor(get_string("vcbot_5"))
 

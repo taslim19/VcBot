@@ -71,7 +71,7 @@ async def play_music_(event):
             link = link.strip().split()
     ultSongs = Player(chat, event)
     song_name = f"{song_name[:30]}..."
-    if not ultSongs.group_call.is_connected:
+    if not (await ultSongs.group_call.is_connected_async()):
         if not (await ultSongs.vc_joiner()):
             return
         await ultSongs.group_call.start_audio(song)
@@ -147,7 +147,7 @@ async def play_music_(event):
             msg, song, fast_download=False
         )
         song_name = f"{song_name[:30]}..."
-        if not ultSongs.group_call.is_connected:
+        if not (await ultSongs.group_call.is_connected_async()):
             if not (await ultSongs.vc_joiner()):
                 return
             await ultSongs.group_call.start_audio(song)
@@ -193,7 +193,7 @@ async def radio_mirchi(e):
     if not is_url_ok(song):
         return await xx.eor(f"`{song}`\n\nNot a playable link.🥱")
     ultSongs = Player(chat, e)
-    if not ultSongs.group_call.is_connected and not (await ultSongs.vc_joiner()):
+    if not (await ultSongs.group_call.is_connected_async()) and not (await ultSongs.vc_joiner()):
         return
     await ultSongs.group_call.start_audio(song)
     await xx.reply(
@@ -224,7 +224,7 @@ async def live_stream(e):
         return await xx.eor(f"Only Live Youtube Urls supported!\n{song}")
     file, thumb, title, link, duration = await download(song)
     ultSongs = Player(chat, e)
-    if not ultSongs.group_call.is_connected and not (await ultSongs.vc_joiner()):
+    if not (await ultSongs.group_call.is_connected_async()) and not (await ultSongs.vc_joiner()):
         return
     from_user = inline_mention(e.sender)
     await xx.reply(

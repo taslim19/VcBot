@@ -6,7 +6,7 @@
 # <https://www.github.com/TeamUltroid/Ultroid/blob/main/LICENSE/>.
 
 """
-✘ Commands Available
+✘ Commands Available (py-tgcalls 2.x)
 
 `{i}videoplay <song name/url/m3u8 links/reply to video>`
    Stream Videos in chat.

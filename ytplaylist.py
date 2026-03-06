@@ -42,7 +42,7 @@ async def live_stream(e):
         chat, inline_mention(e), song
     )
     ultSongs = Player(chat, e)
-    if not ultSongs.group_call.is_connected:
+    if not (await ultSongs.group_call.is_connected_async()):
         if not (await ultSongs.vc_joiner()):
             return
         from_user = inline_mention(e.sender)
