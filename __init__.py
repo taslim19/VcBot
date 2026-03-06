@@ -214,7 +214,7 @@ class Player:
 
     async def _is_connected(self):
         app = _get_pytgcalls()
-        gc = await app.group_calls()
+        gc = await app.group_calls
         return self._chat in gc
 
     async def make_vc_active(self):
