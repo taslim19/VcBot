@@ -70,14 +70,47 @@ LOG_CHANNEL = udB.get_key("LOG_CHANNEL")
 ACTIVE_CALLS, VC_QUEUE = [], {}
 MSGID_CACHE, VIDEO_ON = {}, {}
 
-# py-tgcalls 2.x: single app instance (Telethon)
+# py-tgcalls 2.x: single app instance (Telethon / Telethon-like)
 _pytgcalls_app = None
+
+
+def _wrap_for_pytgcalls(client):
+    """
+    Ensure the client looks like a supported MTProto client for py-tgcalls.
+
+    On Ultroid, vcClient may be a thin wrapper whose __module__ is not 'telethon',
+    which would cause InvalidMTProtoClient(). We wrap it in a shim that delegates
+    attribute access but reports module 'telethon' so Telethon backend is used.
+    """
+    try:
+        # Fast path: if py-tgcalls already recognizes it, just return as-is.
+        from pytgcalls.mtproto.bridged_client import BridgedClient
+
+        if BridgedClient.package_name(client) in {"pyrogram", "telethon", "hydrogram"}:
+            return client
+    except Exception:
+        # If anything goes wrong, fall back to shim logic below.
+        pass
+
+    class _TelethonShim:
+        __slots__ = ("_inner",)
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    # Make py-tgcalls see it as a Telethon client.
+    _TelethonShim.__module__ = "telethon"
+    return _TelethonShim(client)
 
 
 def _get_pytgcalls():
     global _pytgcalls_app
     if _pytgcalls_app is None:
-        _pytgcalls_app = PyTgCalls(vcClient)
+        client_for_pytgcalls = _wrap_for_pytgcalls(vcClient)
+        _pytgcalls_app = PyTgCalls(client_for_pytgcalls)
     return _pytgcalls_app
 
 
